@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <!-- Full-screen display surface -->
+    <SurfaceView
+        android:id="@+id/surface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- HUD overlay — tap anywhere to show/hide via alpha -->
+    <LinearLayout
+        android:id="@+id/hud"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:orientation="horizontal"
+        android:padding="8dp"
+        android:background="#88000000">
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Not connected"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:paddingEnd="8dp" />
+
+        <Button
+            android:id="@+id/btnSettings"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="⚙"
+            android:textSize="16sp"
+            style="?attr/materialIconButtonStyle" />
+
+        <Button
+            android:id="@+id/btnConnect"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Connect"
+            style="?attr/materialButtonStyle" />
+
+    </LinearLayout>
+
+</FrameLayout>
