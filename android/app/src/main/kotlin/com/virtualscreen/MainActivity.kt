@@ -71,9 +71,33 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     // ── SurfaceHolder ─────────────────────────────────────────────────────────
 
-    override fun surfaceCreated(holder: SurfaceHolder) {}
-    override fun surfaceChanged(holder: SurfaceHolder, fmt: Int, w: Int, h: Int) {}
-    override fun surfaceDestroyed(holder: SurfaceHolder) { disconnect() }
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        if (isDecoderConfigured && decoder != null && holder.surface.isValid) {
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                    decoder?.setOutputSurface(holder.surface)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("VirtualScreen", "Error updating output surface", e)
+            }
+        }
+    }
+
+    override fun surfaceChanged(holder: SurfaceHolder, fmt: Int, w: Int, h: Int) {
+        if (isDecoderConfigured && decoder != null && holder.surface.isValid) {
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                    decoder?.setOutputSurface(holder.surface)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("VirtualScreen", "Error updating output surface on surfaceChanged", e)
+            }
+        }
+    }
+
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
+        // Do NOT call disconnect() here as layout aspect ratio adjustments destroy/recreate surface
+    }
 
     // ── Connection ────────────────────────────────────────────────────────────
 
@@ -100,7 +124,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         withContext(Dispatchers.Main) {
                             binding.status.text = "Connected · ${displayWidth}×${displayHeight} (H.264)"
                             adjustSurfaceAspectRatio(displayWidth, displayHeight)
-                            initDecoder(displayWidth, displayHeight)
+                            binding.surface.post { initDecoder(displayWidth, displayHeight) }
                         }
                     }
 
@@ -136,10 +160,15 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     private fun initDecoder(width: Int, height: Int) {
         if (isDecoderConfigured) return
+        val surface = binding.surface.holder.surface
+        if (!surface.isValid) {
+            binding.surface.post { initDecoder(width, height) }
+            return
+        }
         try {
             val format = android.media.MediaFormat.createVideoFormat(android.media.MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
             decoder = android.media.MediaCodec.createDecoderByType(android.media.MediaFormat.MIMETYPE_VIDEO_AVC)
-            decoder?.configure(format, binding.surface.holder.surface, null, 0)
+            decoder?.configure(format, surface, null, 0)
             decoder?.start()
             isDecoderConfigured = true
             
@@ -173,6 +202,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     private fun renderFrame(h264: ByteArray) {
         val codec = decoder ?: return
+        if (!isDecoderConfigured) return
         try {
             val inIndex = codec.dequeueInputBuffer(10000)
             if (inIndex >= 0) {

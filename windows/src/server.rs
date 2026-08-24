@@ -42,24 +42,23 @@ async fn handle_client(
 ) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
 
-    let (w, h) = {
+    let (w, h, full_w, full_h) = {
         let c = capturer.lock().await;
         let sw = (c.width  as f32 * scale) as u32;
         let sh = (c.height as f32 * scale) as u32;
-        (sw, sh)
+        (sw, sh, c.width, c.height)
     };
     let hs = serde_json::to_vec(&HandshakeInfo { width: w, height: h, fps })?;
     send_msg(&mut writer, MSG_HANDSHAKE, &hs).await?;
 
     let (mon_x, mon_y) = input::monitor_offset(monitor_index).unwrap_or((0, 0));
-    let (w2, h2) = (w, h);
 
     tokio::spawn(async move {
         loop {
             match recv_msg(&mut reader).await {
                 Ok((MSG_TOUCH, payload)) => {
                     if let Ok(ev) = serde_json::from_slice::<TouchEvent>(&payload) {
-                        input::handle_touch(&ev, mon_x, mon_y, w2, h2);
+                        input::handle_touch(&ev, mon_x, mon_y, full_w, full_h);
                     }
                 }
                 Ok(_) => {}
@@ -70,12 +69,23 @@ async fn handle_client(
 
     let frame_ms = 1000 / fps.max(1);
     let mut tick = interval(Duration::from_millis(frame_ms as u64));
+    let mut frame_count = 0u64;
+    let mut force_keyframe = true; // Force keyframe on initial client connection!
+
     loop {
         tick.tick().await;
+        frame_count += 1;
+
+        if frame_count % 60 == 0 {
+            force_keyframe = true; // Force periodic keyframe every ~2s
+        }
+
+        let force_now = force_keyframe;
+        force_keyframe = false;
 
         let frame_opt = {
             let mut c = capturer.lock().await;
-            match c.capture_frame(scale) {
+            match c.capture_frame(scale, force_now) {
                 Ok(f) => f,
                 Err(e) if e.to_string().contains("ACCESS_LOST") => {
                     log::warn!("ACCESS_LOST — recreating capturer…");
@@ -91,8 +101,8 @@ async fn handle_client(
             }
         };
 
-        if let Some(jpeg) = frame_opt {
-            send_msg(&mut writer, MSG_FRAME, &jpeg).await?;
+        if let Some(h264) = frame_opt {
+            send_msg(&mut writer, MSG_FRAME, &h264).await?;
         }
     }
 }

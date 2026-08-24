@@ -11,9 +11,10 @@ pub fn handle_touch(event: &TouchEvent, display_x: i32, display_y: i32, w: u32, 
     let abs_y = display_y + (event.y * h as f32) as i32;
 
     // Windows absolute coords are 0-65535 across the full virtual desktop
-    let (desktop_w, desktop_h) = virtual_desktop_size();
-    let norm_x = ((abs_x as f64 / desktop_w as f64) * 65535.0) as i32;
-    let norm_y = ((abs_y as f64 / desktop_h as f64) * 65535.0) as i32;
+    // (origin can be negative when monitors sit left/above the primary one)
+    let (vs_x, vs_y, vs_w, vs_h) = virtual_desktop_rect();
+    let norm_x = (((abs_x - vs_x) as f64 / vs_w as f64) * 65535.0) as i32;
+    let norm_y = (((abs_y - vs_y) as f64 / vs_h as f64) * 65535.0) as i32;
 
     let flags_base = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK;
 
@@ -42,10 +43,15 @@ pub fn handle_touch(event: &TouchEvent, display_x: i32, display_y: i32, w: u32, 
     }
 }
 
-fn virtual_desktop_size() -> (i32, i32) {
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN};
+fn virtual_desktop_rect() -> (i32, i32, i32, i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
     unsafe {
         (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
             GetSystemMetrics(SM_CXVIRTUALSCREEN),
             GetSystemMetrics(SM_CYVIRTUALSCREEN),
         )

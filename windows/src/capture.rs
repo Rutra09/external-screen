@@ -33,6 +33,7 @@ pub struct Capturer {
     cursor_type:  i32,
     // H.264 Encoder (optional until first frame)
     encoder: Option<Encoder>,
+    last_frame: Option<Vec<u8>>,
 }
 
 unsafe impl Send for Capturer {}
@@ -51,46 +52,62 @@ impl Capturer {
             cursor_shape: Vec::new(),
             cursor_w: 0, cursor_h: 0, cursor_pitch: 0, cursor_type: 0,
             encoder: None,
+            last_frame: None,
         })
     }
 
-    pub fn capture_frame(&mut self, scale: f32) -> Result<Option<Vec<u8>>> {
+    pub fn capture_frame(&mut self, scale: f32, force_keyframe: bool) -> Result<Option<Vec<u8>>> {
+        if force_keyframe {
+            self.encoder = None; // Reset encoder to force SPS+PPS+IDR keyframe on next frame
+        }
+
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
 
-        match unsafe { self.duplication.AcquireNextFrame(0, &mut frame_info, &mut resource) } {
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
+        let got_new_frame = match unsafe { self.duplication.AcquireNextFrame(0, &mut frame_info, &mut resource) } {
+            Ok(()) => true,
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => false,
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST =>
                 anyhow::bail!("DXGI_ERROR_ACCESS_LOST"),
-            other => other.context("AcquireNextFrame")?,
-        }
+            Err(e) => return Err(e.into()),
+        };
 
-        // Keep DXGI shape cache in sync (must call before ReleaseFrame)
-        if frame_info.PointerShapeBufferSize > 0 {
-            let mut buf = vec![0u8; frame_info.PointerShapeBufferSize as usize];
-            let mut info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
-            let mut req = 0u32;
-            unsafe {
-                let _ = self.duplication.GetFramePointerShape(
-                    buf.len() as u32, buf.as_mut_ptr() as _, &mut req, &mut info,
-                );
+        if got_new_frame {
+            // Keep DXGI shape cache in sync (must call before ReleaseFrame)
+            if frame_info.PointerShapeBufferSize > 0 {
+                let mut buf = vec![0u8; frame_info.PointerShapeBufferSize as usize];
+                let mut info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+                let mut req = 0u32;
+                unsafe {
+                    let _ = self.duplication.GetFramePointerShape(
+                        buf.len() as u32, buf.as_mut_ptr() as _, &mut req, &mut info,
+                    );
+                }
+                self.cursor_w     = info.Width;
+                self.cursor_h     = info.Height;
+                self.cursor_pitch = info.Pitch;
+                self.cursor_hot   = POINT { x: info.HotSpot.x as i32, y: info.HotSpot.y as i32 };
+                self.cursor_type  = info.Type as i32;
+                self.cursor_shape = buf;
             }
-            self.cursor_w     = info.Width;
-            self.cursor_h     = info.Height;
-            self.cursor_pitch = info.Pitch;
-            self.cursor_hot   = POINT { x: info.HotSpot.x as i32, y: info.HotSpot.y as i32 };
-            self.cursor_type  = info.Type as i32;
-            self.cursor_shape = buf;
-        }
 
-        let texture: ID3D11Texture2D = resource.ok_or_else(|| anyhow!("null"))?.cast()?;
-        unsafe { self.context.CopyResource(&self.staging, &texture); }
-        unsafe { self.duplication.ReleaseFrame()? };
+            let texture: ID3D11Texture2D = resource.ok_or_else(|| anyhow!("null"))?.cast()?;
+            unsafe { self.context.CopyResource(&self.staging, &texture); }
+            unsafe { self.duplication.ReleaseFrame()? };
+        } else {
+            // If screen is static and we don't force a keyframe, return last encoded frame (or None)
+            if !force_keyframe && self.last_frame.is_some() {
+                return Ok(None);
+            }
+        }
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe { self.context.Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))? };
-        let h264 = self.encode_h264(&mapped, scale)?;
+        let h264_res = self.encode_h264(&mapped, scale);
         unsafe { self.context.Unmap(&self.staging, 0) };
+
+        let h264 = h264_res?;
+        self.last_frame = Some(h264.clone());
         Ok(Some(h264))
     }
 
@@ -100,12 +117,8 @@ impl Capturer {
         let pitch = mapped.RowPitch as usize;
         let w = self.width as usize;
         let h = self.height as usize;
-        let sw = (w as f32 * scale) as usize;
-        let sh = (h as f32 * scale) as usize;
-        
-        // H.264 requires even dimensions
-        let sw = sw & !1;
-        let sh = sh & !1;
+        let sw = ((w as f32 * scale) as usize).max(2) & !1;
+        let sh = ((h as f32 * scale) as usize).max(2) & !1;
 
         let bgra = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, pitch * h) };
         
@@ -114,32 +127,17 @@ impl Capturer {
         let mut u_plane = vec![0u8; (sw / 2) * (sh / 2)];
         let mut v_plane = vec![0u8; (sw / 2) * (sh / 2)];
 
-        // We process 2 rows at a time to easily compute U and V
-        y_plane.par_chunks_exact_mut(sw * 2).enumerate().for_each(|(chunk_y, y_chunk)| {
-            let sy_top = chunk_y * 2;
-            let sy_bot = sy_top + 1;
-            let orig_y_top = (sy_top as f32 / scale) as usize;
-            let orig_y_bot = (sy_bot as f32 / scale) as usize;
-
-            let u_start = chunk_y * (sw / 2);
-            let v_start = u_start;
-            // Since we cannot borrow U/V mutably inside this parallel loop safely without split,
-            // we will just do a secondary parallel pass for UV, or use raw pointers.
-            // Let's just do an unsafe pointer write to U/V planes for max speed.
-        });
-        
-        // Simpler, fully safe approach: process blocks
         let u_ptr = u_plane.as_mut_ptr() as usize;
         let v_ptr = v_plane.as_mut_ptr() as usize;
         
         y_plane.par_chunks_exact_mut(sw * 2).enumerate().for_each(|(chunk_y, y_chunk)| {
             let sy_top = chunk_y * 2;
-            let orig_y_top = (sy_top as f32 / scale) as usize;
-            let orig_y_bot = ((sy_top + 1) as f32 / scale) as usize;
+            let orig_y_top = usize::min((sy_top as f32 / scale) as usize, h - 1);
+            let orig_y_bot = usize::min(((sy_top + 1) as f32 / scale) as usize, h - 1);
             
             for sx in (0..sw).step_by(2) {
-                let orig_x = (sx as f32 / scale) as usize;
-                let orig_x_r = ((sx + 1) as f32 / scale) as usize;
+                let orig_x = usize::min((sx as f32 / scale) as usize, w - 1);
+                let orig_x_r = usize::min(((sx + 1) as f32 / scale) as usize, w - 1);
                 
                 // Top-left pixel
                 let mut px = orig_y_top * pitch + orig_x * 4;
@@ -186,7 +184,7 @@ impl Capturer {
             width: sw, height: sh,
         };
 
-        // Draw cursor directly onto YUV (simplified: just Y channel for now to show cursor)
+        // Draw cursor directly onto YUV
         let cursor_draw: Option<POINT> = unsafe {
             let mut ci = CURSORINFO {
                 cbSize: std::mem::size_of::<CURSORINFO>() as u32,
