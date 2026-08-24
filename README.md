@@ -10,15 +10,15 @@ Połączenie przez **LAN** lub **USB (ADB)**.
 ```
 Windows (Rust server)
   └─ tworzy virtual display (IDD driver)
-  └─ DXGI Desktop Duplication → JPEG frames
+  └─ DXGI Desktop Duplication → H.264 (openh264, 15 Mbps)
   └─ raw TCP  [u8 type][u32 len][payload]
        │
        ├── LAN (Wi-Fi / Ethernet)
        └── USB via adb reverse
 
 Android (Kotlin app)
-  └─ java.net.Socket → odbiera JPEG
-  └─ SurfaceView → renderuje ramki
+  └─ java.net.Socket → odbiera H.264
+  └─ MediaCodec (sprzętowy dekoder) → SurfaceView
   └─ touch events → wysyła z powrotem do Windows
 ```
 
@@ -57,10 +57,12 @@ Flagi:
 | Flag | Domyślnie | Opis |
 |------|-----------|------|
 | `--port` | 9999 | Port TCP |
-| `--monitor` | 1 | Indeks monitora (0=primary) |
+| `--monitor` | 2 | Indeks monitora (0=primary) |
 | `--virtual-display` | off | Utwórz wirtualny display przez VDD |
 | `--width/--height/--refresh` | 1920x1080@60 | Rozdzielczość virtual display |
-| `--quality` | 75 | JPEG quality (1-100) |
+| `--scale` | 0.5 | Downscale 0.1–1.0 (1.0 = pełna rozdzielczość; 0.5 = 4× mniej danych — zalecane na Wi-Fi) |
+| `--fps` | 30 | Docelowe FPS |
+| `--quality` | 65 | ⚠️ nieużywana (H.264 ma stały bitrate 15 Mbps) |
 
 ### Android app
 
@@ -98,4 +100,4 @@ cd android
 | `Capture init failed` | Sprawdź `--monitor` index — uruchom bez `--virtual-display` i spróbuj 0, 1, 2 |
 | VDD pipe error | Zainstaluj Virtual Display Driver i poczekaj chwilę po instalacji |
 | Czarny ekran na Android | Windows Defender / firewall — odblokuj port 9999 TCP |
-| Wysokie opóźnienie | Użyj USB zamiast Wi-Fi, zmniejsz `--quality` (np. 50) |
+| Wysokie opóźnienie | Użyj USB zamiast Wi-Fi, zmniejsz `--scale` (np. 0.5) |
